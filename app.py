@@ -5,6 +5,7 @@ import uuid
 import time
 import logging
 import re
+from threading import Lock
 
 app = Flask(__name__)
 
@@ -16,12 +17,28 @@ logger = logging.getLogger(__name__)
 IMAP_SERVER = "secureimap.t-online.de"
 IMAP_PORT = 993
 
-# Session storage
+# Session storage with thread safety
 imap_sessions = {}
+lock = Lock()
+SESSION_TIMEOUT = 60 * 30  # 30 minutes
+
+def cleanup_sessions():
+    now = time.time()
+    with lock:
+        expired = [sid for sid, sess in imap_sessions.items() if now - sess['last_used'] > SESSION_TIMEOUT]
+        for sid in expired:
+            try:
+                sess = imap_sessions[sid]
+                sess['mail'].logout()
+            except Exception:
+                pass
+            del imap_sessions[sid]
+    if expired:
+        logger.info(f"Cleaned up expired sessions: {expired}")
 
 @app.route("/login", methods=["GET"])
 def login():
-    """Handle IMAP login via GET request and return session ID"""
+    cleanup_sessions()
     email_address = request.args.get("email")
     password = request.args.get("password")
     
@@ -35,7 +52,13 @@ def login():
         logger.info(f"Login successful for {email_address}")
         
         session_id = str(uuid.uuid4())
-        imap_sessions[session_id] = mail
+        with lock:
+            imap_sessions[session_id] = {
+                "mail": mail,
+                "email": email_address,
+                "password": password,
+                "last_used": time.time()
+            }
         
         return jsonify({
             "session_id": session_id,
@@ -58,15 +81,40 @@ def login():
 
 @app.route("/inbox/latest", methods=["GET"])
 def get_latest_email():
-    """Fetch the latest Lieferando email and extract verification code"""
+    cleanup_sessions()
+
     session_id = request.args.get("session_id")
     if not session_id:
         return jsonify({"error": "Missing session_id parameter"}), 400
-    
-    mail = imap_sessions.get(session_id)
-    if not mail:
+
+    with lock:
+        session = imap_sessions.get(session_id)
+
+    if not session:
         return jsonify({"error": "Invalid or expired session"}), 401
-    
+
+    mail = session["mail"]
+
+    # Check connection health
+    try:
+        mail.noop()
+    except Exception:
+        logger.info(f"IMAP connection lost for session {session_id}, trying to reconnect...")
+        try:
+            mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+            mail.login(session["email"], session["password"])
+            with lock:
+                imap_sessions[session_id]["mail"] = mail
+        except Exception as e:
+            logger.error(f"Reconnect failed for session {session_id}: {e}")
+            with lock:
+                del imap_sessions[session_id]
+            return jsonify({"error": "Session expired, please login again"}), 401
+
+    # Update last_used timestamp
+    with lock:
+        imap_sessions[session_id]["last_used"] = time.time()
+
     refresh_count = 3
     wait_seconds = 2
 
@@ -76,9 +124,9 @@ def get_latest_email():
 
     try:
         for attempt in range(1, refresh_count + 1):
-            logger.info(f"Attempt {attempt} to fetch email")
+            logger.info(f"Attempt {attempt} to fetch email for session {session_id}")
             try:
-                mail.select("inbox", readonly=True)
+                mail.select("INBOX", readonly=True)
                 status, messages = mail.search(None, '(FROM "no-reply@lieferando.de")')
                 
                 if status == "OK" and messages[0]:
@@ -105,7 +153,7 @@ def get_latest_email():
                     time.sleep(wait_seconds)
 
             except Exception as e:
-                logger.error(f"Error during attempt {attempt}: {str(e)}")
+                logger.error(f"Error during attempt {attempt} for session {session_id}: {str(e)}")
                 if attempt == refresh_count:
                     raise
                 time.sleep(wait_seconds)
@@ -116,10 +164,10 @@ def get_latest_email():
         }), 404
 
     except Exception as e:
-        logger.error(f"Failed to process email: {str(e)}")
+        logger.error(f"Failed to process email for session {session_id}: {str(e)}")
         return jsonify({
             "error": "Email processing failed",
             "detail": str(e)
         }), 500
 
-# Do not include app.run() — Gunicorn handles that in Render deployment
+# Note: app.run() omitted as Gunicorn or other WSGI servers will be used.

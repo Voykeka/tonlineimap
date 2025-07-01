@@ -3,13 +3,10 @@ import imaplib
 import email
 import uuid
 import time
-import logging
 import re
 from threading import Lock
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Thread-safe session storage
 imap_sessions = {}
@@ -19,14 +16,6 @@ IMAP_CONFIG = {
     "t-online.de": ("secureimap.t-online.de", 993),
     "freenet.de": ("imap.freenet.de", 993)
 }
-
-# Keep connections alive by sending NOOP every ~2 mins
-def keep_alive(mail):
-    try:
-        mail.noop()
-    except Exception as e:
-        logger.warning(f"IMAP keep-alive failed: {e}")
-        raise
 
 @app.route("/login", methods=["GET"])
 def login():
@@ -43,32 +32,25 @@ def login():
     imap_server, imap_port = IMAP_CONFIG[domain]
 
     try:
-        logger.info(f"Connecting to {imap_server}:{imap_port}")
         mail = imaplib.IMAP4_SSL(imap_server, imap_port)
         mail.login(email_address, password)
-        
-        # Set timeout to prevent hanging
-        mail.socket().settimeout(30)  # 30 sec timeout
+        mail.noop()  # Force connection alive
+        mail.socket().settimeout(5)  # 5-second timeout
 
         session_id = str(uuid.uuid4())
         with session_lock:
             imap_sessions[session_id] = {
                 "mail": mail,
                 "email": email_address,
-                "password": password,  # Stored for reconnection
+                "password": password,
                 "last_activity": time.time()
             }
 
-        return jsonify({
-            "session_id": session_id,
-            "status": "ready"
-        })
+        return jsonify({"session_id": session_id, "status": "ready"})
 
-    except imaplib.IMAP4.error as e:
-        logger.error(f"IMAP login failed: {e}")
+    except imaplib.IMAP4.error:
         return jsonify({"error": "Login failed"}), 403
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+    except Exception:
         return jsonify({"error": "Server error"}), 500
 
 @app.route("/inbox/latest", methods=["GET"])
@@ -87,22 +69,20 @@ def get_latest_email():
         password = session["password"]
 
     def reconnect():
-        logger.info("Attempting to reconnect...")
         domain = email_address.split('@')[-1].lower()
         imap_server, imap_port = IMAP_CONFIG[domain]
         new_mail = imaplib.IMAP4_SSL(imap_server, imap_port)
         new_mail.login(email_address, password)
-        new_mail.socket().settimeout(30)
+        new_mail.socket().settimeout(5)
         with session_lock:
             imap_sessions[session_id]["mail"] = new_mail
         return new_mail
 
     try:
-        # Check if connection is alive
         try:
-            keep_alive(mail)
+            mail.noop()  # Check if alive
         except:
-            mail = reconnect()  # Auto-reconnect if dead
+            mail = reconnect()
 
         mail.select("INBOX", readonly=True)
         status, messages = mail.search(None, '(FROM "no-reply@lieferando.de")')
@@ -130,7 +110,6 @@ def get_latest_email():
         if not html:
             return jsonify({"error": "No HTML content found"}), 404
 
-        # Extract verification code
         match = re.search(r'<span style="color: #FB6100;">\s*([A-Z0-9]{6})\s*</span>', html)
         if not match:
             return jsonify({"error": "Verification code not found"}), 404
@@ -139,16 +118,14 @@ def get_latest_email():
         return code, 200, {"Content-Type": "text/plain"}
 
     except imaplib.IMAP4.abort:
-        logger.error("IMAP connection aborted")
         return jsonify({"error": "Connection lost"}), 503
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+    except Exception:
         return jsonify({"error": "Server error"}), 500
 
-# Cleanup old sessions (run in background)
+# Background session cleanup
 def cleanup_sessions():
     while True:
-        time.sleep(60)  # Run every minute
+        time.sleep(60)
         now = time.time()
         expired = []
         with session_lock:

@@ -130,7 +130,7 @@ def cleanup_sessions():
         expired = []
         with session_lock:
             for session_id, session in list(imap_sessions.items()):
-                if now - session["last_activity"] > 1800:  # 30 min expiry
+                if now - session["last_activity"] > 60:  # 30 min expiry
                     try:
                         session["mail"].logout()
                     except:

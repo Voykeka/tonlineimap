@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 import imaplib
 import email
 import uuid
@@ -8,11 +8,6 @@ from threading import Lock
 
 app = Flask(__name__)
 
-@app.after_request
-def disable_compression(response):
-    response.headers["Content-Encoding"] = "identity"
-    return response
-# Thread-safe session storage
 imap_sessions = {}
 session_lock = Lock()
 
@@ -38,8 +33,8 @@ def login():
     try:
         mail = imaplib.IMAP4_SSL(imap_server, imap_port)
         mail.login(email_address, password)
-        mail.noop()  # Force connection alive
-        mail.socket().settimeout(5)  # 5-second timeout
+        mail.noop()
+        mail.socket().settimeout(5)
 
         session_id = str(uuid.uuid4())
         with session_lock:
@@ -61,12 +56,12 @@ def login():
 def get_latest_email():
     session_id = request.args.get("session_id")
     if not session_id:
-        return Response("error: missing session_id\n", status=400, mimetype="text/plain")
+        return jsonify({"error": "Missing session_id"}), 400
 
     with session_lock:
         session = imap_sessions.get(session_id)
         if not session:
-            return Response("error: invalid or expired session\n", status=401, mimetype="text/plain")
+            return jsonify({"error": "Invalid or expired session"}), 401
 
         mail = session["mail"]
         email_address = session["email"]
@@ -84,67 +79,53 @@ def get_latest_email():
 
     try:
         try:
-            mail.noop()  # Check if alive
+            mail.noop()
         except:
             mail = reconnect()
 
         mail.select("INBOX", readonly=True)
-        status, messages = mail.search(None, '(FROM "no-reply@lieferando.de")')
+        status, messages = mail.search(None, '(FROM "no-reply@m.mail.burgerking.de")')
 
         if status != "OK" or not messages[0]:
-            print("⚠️ No emails found.")
-            return Response("no emails found\n", status=404, mimetype="text/plain")
+            return jsonify({"error": "No emails found"}), 404
 
         latest_id = messages[0].split()[-1]
         status, data = mail.fetch(latest_id, "(RFC822)")
 
         if status != "OK":
-            print("⚠️ Failed to fetch email.")
-            return Response("failed to fetch email\n", status=500, mimetype="text/plain")
+            return jsonify({"error": "Failed to fetch email"}), 500
 
         msg = email.message_from_bytes(data[0][1])
-        html = None
 
+        # First try to extract from subject
+        subject = msg["Subject"] or ""
+        match = re.search(r"\b(\d{6})\b", subject)
+        if match:
+            return match.group(1), 200, {"Content-Type": "text/plain"}
+
+        # If not found, try to extract from HTML body
+        html = None
         if msg.is_multipart():
             for part in msg.walk():
                 if part.get_content_type() == "text/html":
-                    html = part.get_payload(decode=True)
-                    if html:
-                        html = html.decode(part.get_content_charset() or "utf-8", errors="ignore")
+                    html = part.get_payload(decode=True).decode("utf-8", errors="ignore")
                     break
         elif msg.get_content_type() == "text/html":
-            html = msg.get_payload(decode=True)
-            if html:
-                html = html.decode(msg.get_content_charset() or "utf-8", errors="ignore")
+            html = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-        if not html:
-            print("❌ No HTML content found in email.")
-            return Response("no html content found\n", status=404, mimetype="text/plain")
+        if html:
+            match = re.search(r"\b(\d{6})\b", html)
+            if match:
+                return match.group(1), 200, {"Content-Type": "text/plain"}
 
-        match = re.search(
-            r'<td[^>]*class=["\']?code-text["\']?[^>]*>\s*([A-Z0-9]{6})\s*<',
-            html,
-            re.IGNORECASE
-        )
-
-        if match:
-            code = match.group(1).strip()
-            print(f"✅ Code found: {code}")
-            return Response(f"code found: {code}\n", status=200, mimetype="text/plain")
-        else:
-            print("⚠️ Verification code not found.")
-            return Response("no code found, reload page\n", status=200, mimetype="text/plain")
+        return jsonify({"error": "Verification code not found"}), 404
 
     except imaplib.IMAP4.abort:
-        print("❌ IMAP connection lost.")
-        return Response("connection lost\n", status=503, mimetype="text/plain")
-    except Exception as e:
-        import traceback
-        print("🔥 Server error:", e)
-        traceback.print_exc()
-        return Response("server error\n", status=500, mimetype="text/plain")
+        return jsonify({"error": "Connection lost"}), 503
+    except Exception:
+        return jsonify({"error": "Server error"}), 500
 
-# Background session cleanup
+# Cleanup thread
 def cleanup_sessions():
     while True:
         time.sleep(60)
@@ -152,7 +133,7 @@ def cleanup_sessions():
         expired = []
         with session_lock:
             for session_id, session in list(imap_sessions.items()):
-                if now - session["last_activity"] > 60:  # 30 min expiry
+                if now - session["last_activity"] > 60:  # 1 min expiry
                     try:
                         session["mail"].logout()
                     except:
@@ -161,6 +142,5 @@ def cleanup_sessions():
             for session_id in expired:
                 del imap_sessions[session_id]
 
-# Start cleanup thread
 import threading
 threading.Thread(target=cleanup_sessions, daemon=True).start()

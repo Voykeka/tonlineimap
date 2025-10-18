@@ -57,12 +57,12 @@ def login():
 def get_latest_email():
     session_id = request.args.get("session_id")
     if not session_id:
-        return jsonify({"error": "Missing session_id"}), 400
+        return Response("error: missing session_id\n", status=400, mimetype="text/plain")
 
     with session_lock:
         session = imap_sessions.get(session_id)
         if not session:
-            return jsonify({"error": "Invalid or expired session"}), 401
+            return Response("error: invalid or expired session\n", status=401, mimetype="text/plain")
 
         mail = session["mail"]
         email_address = session["email"]
@@ -88,13 +88,15 @@ def get_latest_email():
         status, messages = mail.search(None, '(FROM "no-reply@lieferando.de")')
 
         if status != "OK" or not messages[0]:
-            return jsonify({"error": "No emails found"}), 404
+            print("⚠️ No emails found.")
+            return Response("no emails found\n", status=404, mimetype="text/plain")
 
         latest_id = messages[0].split()[-1]
         status, data = mail.fetch(latest_id, "(RFC822)")
 
         if status != "OK":
-            return jsonify({"error": "Failed to fetch email"}), 500
+            print("⚠️ Failed to fetch email.")
+            return Response("failed to fetch email\n", status=500, mimetype="text/plain")
 
         msg = email.message_from_bytes(data[0][1])
         html = None
@@ -102,30 +104,41 @@ def get_latest_email():
         if msg.is_multipart():
             for part in msg.walk():
                 if part.get_content_type() == "text/html":
-                    html = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                    html = part.get_payload(decode=True)
+                    if html:
+                        html = html.decode(part.get_content_charset() or "utf-8", errors="ignore")
                     break
         elif msg.get_content_type() == "text/html":
-            html = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+            html = msg.get_payload(decode=True)
+            if html:
+                html = html.decode(msg.get_content_charset() or "utf-8", errors="ignore")
 
         if not html:
-            return jsonify({"error": "No HTML content found"}), 404
-        
+            print("❌ No HTML content found in email.")
+            return Response("no html content found\n", status=404, mimetype="text/plain")
+
         match = re.search(
             r'<td[^>]*class=["\']?code-text["\']?[^>]*>\s*([A-Z0-9]{6})\s*<',
             html,
             re.IGNORECASE
         )
-        if not match:
-            return jsonify({"error": "Verification code not found"}), 404
-        
-        code = match.group(1).strip()
-        return code, 200, {"Content-Type": "text/plain"}
 
+        if match:
+            code = match.group(1).strip()
+            print(f"✅ Code found: {code}")
+            return Response(f"code found: {code}\n", status=200, mimetype="text/plain")
+        else:
+            print("⚠️ Verification code not found.")
+            return Response("no code found, reload page\n", status=200, mimetype="text/plain")
 
     except imaplib.IMAP4.abort:
-        return jsonify({"error": "Connection lost"}), 503
-    except Exception:
-        return jsonify({"error": "Server error"}), 500
+        print("❌ IMAP connection lost.")
+        return Response("connection lost\n", status=503, mimetype="text/plain")
+    except Exception as e:
+        import traceback
+        print("🔥 Server error:", e)
+        traceback.print_exc()
+        return Response("server error\n", status=500, mimetype="text/plain")
 
 # Background session cleanup
 def cleanup_sessions():

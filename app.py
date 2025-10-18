@@ -109,13 +109,18 @@ def get_latest_email():
 
         if not html:
             return jsonify({"error": "No HTML content found"}), 404
-
-        match = re.search(r'<span style="color: #FB6100;">\s*([A-Z0-9]{6})\s*</span>', html)
+        
+        match = re.search(
+            r'<td[^>]*class=["\']?code-text["\']?[^>]*>\s*([A-Z0-9]{6})\s*<',
+            html,
+            re.IGNORECASE
+        )
         if not match:
             return jsonify({"error": "Verification code not found"}), 404
-
+        
         code = match.group(1).strip()
         return code, 200, {"Content-Type": "text/plain"}
+
 
     except imaplib.IMAP4.abort:
         return jsonify({"error": "Connection lost"}), 503

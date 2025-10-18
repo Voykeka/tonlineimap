@@ -8,6 +8,10 @@ from threading import Lock
 
 app = Flask(__name__)
 
+@app.after_request
+def disable_compression(response):
+    response.headers["Content-Encoding"] = "identity"
+    return response
 # Thread-safe session storage
 imap_sessions = {}
 session_lock = Lock()

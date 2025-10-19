@@ -84,7 +84,7 @@ def get_latest_email():
             mail = reconnect()
 
         mail.select("INBOX", readonly=True)
-        status, messages = mail.search(None, '(FROM "no-reply@m.mail.burgerking.de")')
+        status, messages = mail.search(None, '(FROM "no-reply@lieferando.de")')
 
         if status != "OK" or not messages[0]:
             return jsonify({"error": "No emails found"}), 404

@@ -97,13 +97,7 @@ def get_latest_email():
 
         msg = email.message_from_bytes(data[0][1])
 
-        # First try to extract from subject
-        subject = msg["Subject"] or ""
-        match = re.search(r"\b(\d{6})\b", subject)
-        if match:
-            return match.group(1), 200, {"Content-Type": "text/plain"}
-
-        # If not found, try to extract from HTML body
+        # Extract HTML content
         html = None
         if msg.is_multipart():
             for part in msg.walk():
@@ -113,8 +107,13 @@ def get_latest_email():
         elif msg.get_content_type() == "text/html":
             html = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
+        # Use the updated regex to match the <td class="code-text">…</td>
         if html:
-            match = re.search(r"\b(\d{6})\b", html)
+            match = re.search(
+                r'<td[^>]*class=["\']?code-text["\']?[^>]*>\s*([A-Z0-9]{6})\s*<',
+                html,
+                re.IGNORECASE
+            )
             if match:
                 return match.group(1), 200, {"Content-Type": "text/plain"}
 
@@ -124,6 +123,7 @@ def get_latest_email():
         return jsonify({"error": "Connection lost"}), 503
     except Exception:
         return jsonify({"error": "Server error"}), 500
+
 
 # Cleanup thread
 def cleanup_sessions():
